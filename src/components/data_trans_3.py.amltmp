@@ -34,7 +34,8 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Shape after converting datetime columns: {df.shape}")
 
             # Handle empty or zero values in 'latestPick' column
-            df['latestPick'] = df['latestPick'].replace(['', '0'], pd.NaT)
+            #df['latestPick'] = df['latestPick'].replace(['', '0'], pd.NaT)
+            df['latestPick'] = df['latestPick'].fillna(df['Buffer Assign'])
             logging.info(f"Shape after handling 'latestPick': {df.shape}")
 
             # Feature engineering: Extract datetime features
@@ -61,7 +62,7 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Shape after adding time-based features: {df.shape}")
 
             # Further time features
-            df['buffer_occupancy_ratio'] = df['pallets_in_buffer'] / df['Confirmed Pallets']
+            df['buffer_occupancy_ratio'] = df['pallets_in_buffer'] / df['Confirmed Pallets'].replace(0, 1e-6)
             df['time_since_latestPick'] = ((df['Buffer Assign'] - df['latestPick']).dt.total_seconds() / 60)
             df['time_since_latestPick'] = df['time_since_latestPick'].fillna(0)
             logging.info(f"Shape after adding time_since_latestPick: {df.shape}")
