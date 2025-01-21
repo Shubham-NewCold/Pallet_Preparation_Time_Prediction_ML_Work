@@ -41,8 +41,7 @@ class DataIngestion:
         logging.info("Entered the data ingestion method or component")
         try:
             #Step - 1 = Reading the dataset
-            csv_path = os.path.join('artifacts', 'CaseStudy_2.csv')
-            df = pd.read_csv(csv_path, encoding='utf-8')[1][7]
+            df = pd.read_csv(os.path.join('artifacts', 'CaseStudy_2.csv')
             logging.info('Read the dataset as dataframe')
 
             os.makedirs(os.path.dirname(self.ingestion_config.train_data_path),exist_ok = True) #Getting the directory name and not deleting
