@@ -13,9 +13,7 @@ COPY . /app
 RUN apt-get update && apt-get install -y libgomp1
 
 # Explicitly copy artifacts
-RUN mkdir -p /app/artifacts
-COPY artifacts/model.pkl /app/artifacts/model.pkl
-COPY artifacts/preprocessor.pkl /app/artifacts/preprocessor.pkl
+COPY artifacts/ /app/artifacts/
  
 # Install system-level dependencies and Python packages listed in requirements.txt
 #RUN apt-get update && pip install -r requirements.txt
