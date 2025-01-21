@@ -11,6 +11,8 @@ COPY . /app
 #RUN apt update -y
 
 RUN apt-get update && apt-get install -y libgomp1
+
+COPY artifacts/ /app/artifacts/
  
 # Install system-level dependencies and Python packages listed in requirements.txt
 #RUN apt-get update && pip install -r requirements.txt
