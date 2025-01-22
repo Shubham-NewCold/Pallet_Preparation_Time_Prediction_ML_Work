@@ -31,7 +31,12 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             datetime_columns = ['Buffer Assign', 'Planned Arrival', 'latestPick']
             for col in datetime_columns:
                 df[col] = pd.to_datetime(df[col], format='%d/%m/%Y %H:%M', errors='coerce')
+                # Replace invalid dates with a default (e.g., current timestamp)
+                df[col] = df[col].fillna(pd.Timestamp.now())  # Or a business-logic default
             logging.info(f"Shape after converting datetime columns: {df.shape}")
+
+            numeric_columns = ['Confirmed Pallets', 'PickedPallets', 'LoadSequence Count', 'Order Count']
+            df[numeric_columns] = df[numeric_columns].fillna(0)  # Or use median/mean
 
             # Handle empty or zero values in 'latestPick' column
             #df['latestPick'] = df['latestPick'].replace(['', '0'], pd.NaT)
@@ -88,7 +93,8 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             carrier_avg_pallets = df.groupby('Carrier')['Confirmed Pallets'].transform('mean')
             df['carrier_avg_pallets'] = carrier_avg_pallets
 
-            mean_arrival_time_by_carrier = df.groupby('Carrier')['Planned Arrival'].transform('mean')
+            global_mean_arrival = df['Planned Arrival'].mean()  # Precompute during training
+            mean_arrival_time_by_carrier = df.groupby('Carrier')['Planned Arrival'].transform(lambda x: x.mean() if not x.empty else global_mean_arrival)
             df['arrival_time_deviation'] = (df['Planned Arrival'] - mean_arrival_time_by_carrier).dt.total_seconds() / 60
             logging.info(f"Shape after encoding categorical features: {df.shape}")
 
@@ -141,6 +147,8 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             df = df[selected_features]
             logging.info(f"Shape after selecting final features: {df.shape}")
             
+            df = df.fillna(0)  # Replace with 0 or another default
+            logging.info(f"Final shape after NaN imputation: {df.shape}")
             return df
         
         except Exception as e:
