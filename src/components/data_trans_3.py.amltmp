@@ -18,7 +18,15 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
     Custom transformer to derive the target variable.
     """
     def fit(self, X, y=None):
-        return self
+        try:
+            # Compute frequency encodings and group means during training
+            self.freq_encoding_carrier = X['Carrier'].value_counts()
+            self.freq_encoding_client = X['Client'].value_counts()
+            self.carrier_avg_pallets = X.groupby('Carrier')['Confirmed Pallets'].mean()
+            self.global_mean_arrival = X['Planned Arrival'].mean()
+            return self
+        except Exception as e:
+            raise CustomException(e, sys)
 
     def transform(self, df):
         # Create a copy to avoid modifying the original data
@@ -26,21 +34,31 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
         try:
             logging.info(f"Starting transformation process...")
             logging.info(f"Shape before preprocessing: {df.shape}")
+
+            # Frequency encoding using precomputed values from fit()
+            df['Carrier'] = df['Carrier'].map(self.freq_encoding_carrier).fillna(0)
+            df['Client'] = df['Client'].map(self.freq_encoding_client).fillna(0)
+
+            # Grouped means using precomputed values from fit()
+            df['carrier_avg_pallets'] = df['Carrier'].map(self.carrier_avg_pallets).fillna(0)
+            mean_arrival_time_by_carrier = df['Carrier'].map(
+                self.carrier_avg_pallets.to_dict()  # Use precomputed training data means
+            ).fillna(self.global_mean_arrival)
+            df['arrival_time_deviation'] = (df['Planned Arrival'] - mean_arrival_time_by_carrier).dt.total_seconds() / 60
             
             # Convert datetime columns
             datetime_columns = ['Buffer Assign', 'Planned Arrival', 'latestPick']
             for col in datetime_columns:
                 df[col] = pd.to_datetime(df[col], format='%d/%m/%Y %H:%M', errors='coerce')
                 # Replace invalid dates with a default (e.g., current timestamp)
-                df[col] = df[col].fillna(pd.Timestamp.now())  # Or a business-logic default
+                df[col] = df[col].fillna(pd.Timestamp('1970-01-01'))  # Use a fixed default
             logging.info(f"Shape after converting datetime columns: {df.shape}")
 
             numeric_columns = ['Confirmed Pallets', 'PickedPallets', 'LoadSequence Count', 'Order Count']
-            df[numeric_columns] = df[numeric_columns].fillna(0)  # Or use median/mean
+            df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors='coerce').fillna(0)  # Add .apply()
 
             # Handle empty or zero values in 'latestPick' column
-            #df['latestPick'] = df['latestPick'].replace(['', '0'], pd.NaT)
-            df['latestPick'] = df['latestPick'].fillna(df['Buffer Assign'])
+            df['latestPick'] = df['latestPick'].replace(['', '0'], pd.NaT)
             logging.info(f"Shape after handling 'latestPick': {df.shape}")
 
             # Feature engineering: Extract datetime features
