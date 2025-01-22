@@ -19,11 +19,33 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
     """
     def fit(self, X, y=None):
         try:
+            # Create a copy to avoid modifying the original data
+            X = X.copy()
+            
+            # Convert 'Planned Arrival' to datetime during fit to compute mean
+            X['Planned Arrival'] = pd.to_datetime(
+                X['Planned Arrival'], 
+                format='%d/%m/%Y %H:%M', 
+                errors='coerce'
+            )
             # Compute frequency encodings and group means during training
+            self.carrier_avg_arrival = (
+                X.groupby('Carrier')['Planned Arrival'].mean()
+                .view('int64')  # Convert to nanoseconds (int64)
+                / 1e9  # Convert to seconds
+            )
+        
+            # Global mean (handling scalar Timestamp)
+            global_mean = X['Planned Arrival'].mean()
+            self.global_mean_arrival = (
+                global_mean.value  # Nanoseconds as integer
+                / 1e9  # Convert to seconds
+                if pd.notnull(global_mean)
+                else 0  # Fallback value if all NaT
+            )
             self.freq_encoding_carrier = X['Carrier'].value_counts()
             self.freq_encoding_client = X['Client'].value_counts()
-            self.carrier_avg_pallets = X.groupby('Carrier')['Confirmed Pallets'].mean()
-            self.global_mean_arrival = X['Planned Arrival'].mean()
+            
             return self
         except Exception as e:
             raise CustomException(e, sys)
@@ -35,24 +57,53 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Starting transformation process...")
             logging.info(f"Shape before preprocessing: {df.shape}")
 
+            # Convert datetime columns FIRST
+            datetime_columns = ['Buffer Assign', 'Planned Arrival', 'latestPick']
+            for col in datetime_columns:
+                df[col] = pd.to_datetime(
+                    df[col], 
+                    format='%d/%m/%Y %H:%M', 
+                    errors='coerce'
+                ).fillna(pd.Timestamp('1970-01-01'))
+
+            # Step 2: Extract datetime features from 'Buffer Assign' while it's still a datetime
+            df['hour'] = df['Buffer Assign'].dt.hour
+            df['month'] = df['Buffer Assign'].dt.month
+            df['quarter'] = df['Buffer Assign'].dt.quarter
+            df['weekday'] = df['Buffer Assign'].dt.weekday  # <-- ADD THIS LINE HERE
+
+            # Step 3: Now convert datetime columns to Unix timestamps
+            for col in datetime_columns:
+                df[col] = (df[col].view('int64') / 1e9).astype('float64')  # Convert to Unix timestamp in seconds
+        
+            logging.info(f"Shape after converting datetime columns: {df.shape}")
+
             # Frequency encoding using precomputed values from fit()
             df['Carrier'] = df['Carrier'].map(self.freq_encoding_carrier).fillna(0)
             df['Client'] = df['Client'].map(self.freq_encoding_client).fillna(0)
 
             # Grouped means using precomputed values from fit()
-            df['carrier_avg_pallets'] = df['Carrier'].map(self.carrier_avg_pallets).fillna(0)
-            mean_arrival_time_by_carrier = df['Carrier'].map(
-                self.carrier_avg_pallets.to_dict()  # Use precomputed training data means
-            ).fillna(self.global_mean_arrival)
-            df['arrival_time_deviation'] = (df['Planned Arrival'] - mean_arrival_time_by_carrier).dt.total_seconds() / 60
-            
-            # Convert datetime columns
-            datetime_columns = ['Buffer Assign', 'Planned Arrival', 'latestPick']
-            for col in datetime_columns:
-                df[col] = pd.to_datetime(df[col], format='%d/%m/%Y %H:%M', errors='coerce')
-                # Replace invalid dates with a default (e.g., current timestamp)
-                df[col] = df[col].fillna(pd.Timestamp('1970-01-01'))  # Use a fixed default
-            logging.info(f"Shape after converting datetime columns: {df.shape}")
+            # Corrected to use carrier_avg_arrival (mean of Planned Arrival)
+            df['carrier_avg_arrival'] = (
+                df['Carrier']
+                .map(self.carrier_avg_arrival.to_dict())
+                .fillna(self.global_mean_arrival)
+            )
+
+            # After calculating mean_arrival_time_by_carrier, add it as a column
+            #df['carrier_avg_arrival'] = mean_arrival_time_by_carrier
+
+            # Convert 'Planned Arrival' to numeric (Unix timestamp)
+            df['Planned Arrival'] = df['Planned Arrival'].view('int64') / 1e9  # Convert to seconds
+
+            # After creating the carrier_avg_arrival column:
+            df['carrier_avg_arrival'] = (
+                df['carrier_avg_arrival']
+                .view('int64')  # Convert datetime to nanoseconds since epoch (but already numeric here)
+                / 1e9  # Convert to seconds
+            )
+
+            df['arrival_time_deviation'] = (df['Planned Arrival'] - df['carrier_avg_arrival']) / 60
 
             numeric_columns = ['Confirmed Pallets', 'PickedPallets', 'LoadSequence Count', 'Order Count']
             df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors='coerce').fillna(0)  # Add .apply()
@@ -62,9 +113,9 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Shape after handling 'latestPick': {df.shape}")
 
             # Feature engineering: Extract datetime features
-            df['hour'] = df['Buffer Assign'].dt.hour
-            df['month'] = df['Buffer Assign'].dt.month
-            df['quarter'] = df['Buffer Assign'].dt.quarter
+            #df['hour'] = df['Buffer Assign'].dt.hour
+            #df['month'] = df['Buffer Assign'].dt.month
+            #df['quarter'] = df['Buffer Assign'].dt.quarter
             logging.info(f"Shape after adding hour, month, and quarter: {df.shape}")
 
             # Cyclic encoding for Quarter (1 to 4)
@@ -73,7 +124,7 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Shape after adding Quarter cyclic encoding: {df.shape}")
 
             # Day of week and DayType features
-            df['weekday'] = df['Buffer Assign'].dt.weekday
+            #df['weekday'] = df['Buffer Assign'].dt.weekday
             df['DayType'] = df['weekday'].apply(lambda x: 'Weekday' if x in [0, 1, 2, 3, 4] else 'Weekend')
             df['DayType_Weekend'] = df['DayType'].map({'Weekend': 1, 'Weekday': 0})
             logging.info(f"Shape after adding DayType features: {df.shape}")
@@ -81,17 +132,18 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             # Time-based features
             df['is_night'] = ((df['hour'] >= 22) | (df['hour'] <= 4)).astype(int)
             df['hour_of_week'] = df['weekday'] * 24 + df['hour']
-            df['pallets_in_buffer'] = df['Confirmed Pallets'] - df['PickedPallets']
+            df['pallets_in_buffer'] = (df['Confirmed Pallets'].astype(float) - df['PickedPallets'].astype(float)).fillna(0)
             logging.info(f"Shape after adding time-based features: {df.shape}")
 
             # Further time features
             df['buffer_occupancy_ratio'] = df['pallets_in_buffer'] / df['Confirmed Pallets'].replace(0, 1e-6)
-            df['time_since_latestPick'] = ((df['Buffer Assign'] - df['latestPick']).dt.total_seconds() / 60)
-            df['time_since_latestPick'] = df['time_since_latestPick'].fillna(0)
+            df['time_since_latestPick'] = (
+                (df['Buffer Assign'] - df['latestPick']) / 60  # Direct subtraction in seconds
+            ).fillna(0)
             logging.info(f"Shape after adding time_since_latestPick: {df.shape}")
 
             # More time-based and density features
-            df['truck_pallet_time_delay'] = ((df['Planned Arrival'] - df['Buffer Assign']).dt.total_seconds() / 60)
+            df['truck_pallet_time_delay'] = (df['Planned Arrival'] - df['Buffer Assign']) / 60
             df['pallet_density'] = df['Confirmed Pallets'] / (df['LoadSequence Count'] + 1)
             df['pick_pallet_ratio'] = df['PickedPallets'] / df['Confirmed Pallets']
             df['order_size'] = df['Confirmed Pallets'] / df['Order Count']
@@ -102,18 +154,11 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Shape after adding additional features: {df.shape}")
 
             # Frequency encoding for categorical columns
-            freq_encoding_carrier = df['Carrier'].value_counts()
-            df['Carrier'] = df['Carrier'].map(freq_encoding_carrier).fillna(0)
 
-            freq_encoding_client = df['Client'].value_counts()
-            df['Client'] = df['Client'].map(freq_encoding_client).fillna(0)
-
-            carrier_avg_pallets = df.groupby('Carrier')['Confirmed Pallets'].transform('mean')
-            df['carrier_avg_pallets'] = carrier_avg_pallets
-
-            global_mean_arrival = df['Planned Arrival'].mean()  # Precompute during training
-            mean_arrival_time_by_carrier = df.groupby('Carrier')['Planned Arrival'].transform(lambda x: x.mean() if not x.empty else global_mean_arrival)
-            df['arrival_time_deviation'] = (df['Planned Arrival'] - mean_arrival_time_by_carrier).dt.total_seconds() / 60
+            #mean_arrival_time_by_carrier = df['Carrier'].map(
+    #self.carrier_avg_arrival.to_dict()
+#).fillna(self.global_mean_arrival)
+            #df['arrival_time_deviation'] = (df['Planned Arrival'] - mean_arrival_time_by_carrier) / 60
             logging.info(f"Shape after encoding categorical features: {df.shape}")
 
             # Cyclic encoding for Day of Week
@@ -132,7 +177,9 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
             logging.info(f"Shape after adding Month cyclic encoding: {df.shape}")
 
             # Add recency-based features
-            df['time_since_last_buffer_assign'] = ((df['Buffer Assign'] - df['Buffer Assign'].shift(1)).dt.total_seconds() / 60).fillna(0)
+            df['time_since_last_buffer_assign'] = (
+                (df['Buffer Assign'] - df['Buffer Assign'].shift(1)) / 60  # Already in seconds
+            ).fillna(0)
             df['recent_pallet_density'] = df['pallet_density'].shift(1).fillna(0)
             df['recent_pick_pallet_ratio'] = df['pick_pallet_ratio'].shift(1).fillna(0)
             logging.info(f"Shape after adding recency features: {df.shape}")
@@ -159,7 +206,7 @@ class CompleteTransformer(BaseEstimator, TransformerMixin):
                 'arrival_time_deviation', 'time_since_last_buffer_assign', 'recent_pallet_density', 
                 'hour_of_week_x_pallets_in_buffer', 'Client_x_Order_Size', 'hour_of_week', 
                 'recent_pick_pallet_ratio', 'hour_of_day_x_pallet_density', 'Carrier_x_Order_Count', 
-                'pallets_in_buffer', 'carrier_avg_pallets', 'order_size', 'pallet_density', 
+                'pallets_in_buffer', 'carrier_avg_arrival', 'order_size', 'pallet_density', 
                 'DayOfWeek_sin'
             ]
             df = df[selected_features]
@@ -338,12 +385,25 @@ class DataTransformation3:
             target_feature_train_df = target_feature_train_df.reset_index(drop=True)
 
             input_feature_train_df_final = preprocessing_obj.fit_transform(input_feature_train_df)
-            input_feature_test_df_final = preprocessing_obj.fit_transform(input_feature_test_df)
+            input_feature_test_df_final = preprocessing_obj.transform(input_feature_test_df)
+            
+            # +++ Add this block here +++
+            # Save features without the target variable (X_train.csv, X_test.csv)
+            X_train = input_feature_train_df_final
+            X_test = input_feature_test_df_final
+
+            X_train.to_csv(os.path.join("artifacts", "X_train.csv"), index=False)
+            X_test.to_csv(os.path.join("artifacts", "X_test.csv"), index=False)
+            # ++++++++++++++++++++++++++++
 
             # Step-3: Rejoining the train_df_final & test_df_final back with the Target Variable
             # Export the DataFrame to a CSV file
             train_df_final = pd.concat([input_feature_train_df_final, target_feature_train_df], axis=1)
             test_df_final = pd.concat([input_feature_test_df_final, target_feature_test_df], axis=1)
+
+            # Then save the final data (train_final.csv, test_final.csv)
+            train_df_final.to_csv(self.data_transformation_config3.train_data_final_path, index=False, header=True)
+            test_df_final.to_csv(self.data_transformation_config3.test_data_final_path, index=False, header=True)
 
             print("######################Checking Shape After Merge######################")
             print("Shape of input_feature_train_df_final", input_feature_train_df_final.shape)
